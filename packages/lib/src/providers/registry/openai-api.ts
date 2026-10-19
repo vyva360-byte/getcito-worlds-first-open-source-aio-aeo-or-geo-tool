@@ -66,6 +66,11 @@ async function runWithChatGptPlan<T>(
 	let buffer = "";
 	let responseBody: any;
 	let streamError: string | undefined;
+	const streamedItems = new Map<number, any>();
+	const streamedContent = new Map<
+		string,
+		{ outputIndex: number; contentIndex: number; text?: string; annotations: any[]; part?: any }
+	>();
 	while (true) {
 		const { value, done } = await reader.read();
 		buffer += decoder.decode(value, { stream: !done });
@@ -77,6 +82,31 @@ async function runWithChatGptPlan<T>(
 			let event: any;
 			try { event = JSON.parse(data); } catch { continue; }
 			if (event.type === "response.completed") responseBody = event.response;
+			if ((event.type === "response.output_item.added" || event.type === "response.output_item.done") &&
+				Number.isInteger(event.output_index) && event.item) {
+				streamedItems.set(event.output_index, event.item);
+			}
+			if ((event.type === "response.output_text.delta" || event.type === "response.output_text.done" ||
+				event.type === "response.content_part.done" || event.type === "response.output_text.annotation.added") &&
+				Number.isInteger(event.output_index) && Number.isInteger(event.content_index)) {
+				const key = `${event.output_index}:${event.content_index}`;
+				const content: {
+					outputIndex: number;
+					contentIndex: number;
+					text?: string;
+					annotations: any[];
+					part?: any;
+				} = streamedContent.get(key) ?? {
+					outputIndex: event.output_index,
+					contentIndex: event.content_index,
+					annotations: [],
+				};
+				if (event.type === "response.output_text.delta") content.text = `${content.text ?? ""}${event.delta ?? ""}`;
+				if (event.type === "response.output_text.done") content.text = event.text ?? content.text;
+				if (event.type === "response.content_part.done") content.part = event.part;
+				if (event.type === "response.output_text.annotation.added" && event.annotation) content.annotations.push(event.annotation);
+				streamedContent.set(key, content);
+			}
 			if (event.type === "response.failed" || event.type === "error") {
 				streamError = event.response?.error?.message ?? event.error?.message ?? "The response stream failed.";
 			}
@@ -85,7 +115,48 @@ async function runWithChatGptPlan<T>(
 	}
 	if (streamError) throw new Error(`OpenAI ChatGPT-plan request failed: ${streamError}`);
 	if (!responseBody) throw new Error("OpenAI ChatGPT-plan stream ended before a completed response event.");
+	// Some ChatGPT-plan Responses streams complete with output: [] even though
+	// they emitted the actual answer as semantic SSE events. Rebuild those items
+	// from the stream so prompt runs retain their answer text and web citations.
+	if (!Array.isArray(responseBody.output) || responseBody.output.length === 0) {
+		for (const content of streamedContent.values()) {
+			let item = streamedItems.get(content.outputIndex);
+			if (!item) {
+				item = { type: "message", role: "assistant", status: "completed", content: [] };
+				streamedItems.set(content.outputIndex, item);
+			}
+			if (!Array.isArray(item.content)) item.content = [];
+			const part = content.part ?? item.content[content.contentIndex] ?? { type: "output_text", text: "", annotations: [] };
+			if (content.text !== undefined) part.text = content.text;
+			if (content.annotations.length > 0) {
+				const annotations = Array.isArray(part.annotations) ? part.annotations : [];
+				const seen = new Set(annotations.map((annotation: any) => JSON.stringify([
+					annotation.type,
+					annotation.url,
+					annotation.start_index,
+					annotation.end_index,
+				])));
+				part.annotations = [
+					...annotations,
+					...content.annotations.filter((annotation) => {
+						const key = JSON.stringify([annotation.type, annotation.url, annotation.start_index, annotation.end_index]);
+						if (seen.has(key)) return false;
+						seen.add(key);
+						return true;
+					}),
+				];
+			}
+			item.content[content.contentIndex] = part;
+		}
+		responseBody.output = [...streamedItems.entries()].sort(([a], [b]) => a - b).map(([, item]) => item);
+	}
+	if (responseBody.output.length === 0 && streamedItems.size === 0) {
+		throw new Error("OpenAI ChatGPT-plan stream completed without output items.");
+	}
 	const textContent = extractTextFromOpenAI(responseBody);
+	if (textContent === "No text content found in OpenAI output.") {
+		throw new Error("OpenAI ChatGPT-plan stream completed without any text content.");
+	}
 	return {
 		response: responseBody,
 		textContent,
