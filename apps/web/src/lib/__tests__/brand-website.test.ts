@@ -2,6 +2,24 @@ import { describe, it, expect } from "vitest";
 import { validateWebsiteUrl } from "@/lib/brand-website";
 
 describe("validateWebsiteUrl", () => {
+	it("accepts case-insensitive HTTP schemes without changing the hostname", () => {
+		expect(validateWebsiteUrl("HTTPS://Example.com/path")).toEqual({
+			isValid: true,
+			formattedUrl: "https://example.com/",
+		});
+	});
+
+	it("rejects non-web schemes and credential-bearing URLs", () => {
+		for (const input of ["ftp://example.com", "javascript:alert(1)", "https://user:secret@example.com"]) {
+			expect(validateWebsiteUrl(input).isValid).toBe(false);
+		}
+	});
+
+	it("still accepts bare domains with an explicit port", () => {
+		expect(validateWebsiteUrl("example.com:8443/path")).toEqual({
+			isValid: true, formattedUrl: "https://example.com:8443/",
+		});
+	});
 	it("rejects empty input", () => {
 		expect(validateWebsiteUrl("")).toEqual({ isValid: false, error: "Website URL is required" });
 	});
