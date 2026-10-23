@@ -15,7 +15,7 @@ export function validateWebsiteUrl(input: string): WebsiteValidationResult {
 		return { isValid: false, error: "Website URL is required" };
 	}
 	let candidate = input.trim();
-	if (!candidate.startsWith("http://") && !candidate.startsWith("https://")) {
+	if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(candidate)) {
 		candidate = `https://${candidate}`;
 	}
 	let urlObj: URL;
@@ -23,6 +23,9 @@ export function validateWebsiteUrl(input: string): WebsiteValidationResult {
 		urlObj = new URL(candidate);
 	} catch {
 		return { isValid: false, error: "Please enter a valid website URL or domain" };
+	}
+	if (!["http:", "https:"].includes(urlObj.protocol) || urlObj.username || urlObj.password) {
+		return { isValid: false, error: "Use an HTTP or HTTPS website URL without credentials" };
 	}
 	if (!cleanAndValidateDomain(urlObj.hostname)) {
 		return { isValid: false, error: "Website URL must have a valid domain name" };
